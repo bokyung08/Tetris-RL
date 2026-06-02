@@ -1,5 +1,13 @@
 # PPO 기반 테트리스 강화학습
 
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+![Gymnasium](https://img.shields.io/badge/Gymnasium-Custom%20Env-008080)
+![Stable-Baselines3](https://img.shields.io/badge/Stable--Baselines3-PPO-EE4C2C)
+![NumPy](https://img.shields.io/badge/NumPy-1.24%2B-013243?logo=numpy&logoColor=white)
+![Matplotlib](https://img.shields.io/badge/Matplotlib-Visualization-11557C)
+![TensorBoard](https://img.shields.io/badge/TensorBoard-Logging-FF6F00?logo=tensorflow&logoColor=white)
+![Benchmark](https://img.shields.io/badge/Benchmark-Heuristic%20vs%20PPO-6A5ACD)
+
 Gymnasium 커스텀 테트리스 환경에서 Stable-Baselines3 PPO 에이전트를 학습하고, 별도 휴리스틱 기준선과 같은 조건으로 성능을 비교하는 강화학습 프로젝트입니다.
 
 ## 프로젝트 목표
