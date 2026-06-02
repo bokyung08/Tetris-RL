@@ -33,25 +33,65 @@ class BoardMetrics:
 
 @dataclass(frozen=True)
 class RewardConfig:
-    survival_bonus: float = 1.0
-    safe_placement_bonus: float = 0.5
-    line_rewards: tuple[float, float, float, float, float] = (0.0, 25.0, 80.0, 180.0, 500.0)
-    new_hole_penalty: float = 18.0
-    hole_delta_penalty: float = 10.0
-    height_increase_penalty: float = 0.4
-    height_decrease_bonus: float = 0.15
-    bumpiness_increase_penalty: float = 0.7
+    survival_bonus: float = 2.0
+    safe_placement_bonus: float = 1.0
+    line_rewards: tuple[float, float, float, float, float] = (0.0, 40.0, 120.0, 300.0, 800.0)
+    new_hole_penalty: float = 10.0
+    hole_delta_penalty: float = 6.0
+    height_increase_penalty: float = 0.3
+    height_decrease_bonus: float = 0.2
+    bumpiness_increase_penalty: float = 0.4
     bumpiness_decrease_bonus: float = 0.2
-    danger_height: int = 14
-    danger_height_penalty: float = 1.2
+    danger_height: int = 16
+    danger_height_penalty: float = 0.4
     invalid_action_penalty: float = 2.0
-    game_over_penalty: float = 180.0
+    game_over_penalty: float = 80.0
 
 
 STAGE_CONFIGS = {
     0: StageConfig(blocks=("I", "O"), fall_speed=1.0, expose_next_block=False),
     1: StageConfig(blocks=BLOCK_NAMES, fall_speed=0.5, expose_next_block=False),
     2: StageConfig(blocks=BLOCK_NAMES, fall_speed=0.25, expose_next_block=True),
+}
+
+
+STAGE_REWARD_CONFIGS = {
+    0: RewardConfig(
+        survival_bonus=2.0,
+        safe_placement_bonus=1.2,
+        line_rewards=(0.0, 35.0, 100.0, 240.0, 650.0),
+        new_hole_penalty=4.0,
+        hole_delta_penalty=2.0,
+        height_increase_penalty=0.15,
+        bumpiness_increase_penalty=0.2,
+        danger_height=17,
+        danger_height_penalty=0.15,
+        game_over_penalty=80.0,
+    ),
+    1: RewardConfig(
+        survival_bonus=2.0,
+        safe_placement_bonus=1.0,
+        line_rewards=(0.0, 40.0, 120.0, 300.0, 800.0),
+        new_hole_penalty=8.0,
+        hole_delta_penalty=4.0,
+        height_increase_penalty=0.25,
+        bumpiness_increase_penalty=0.35,
+        danger_height=16,
+        danger_height_penalty=0.3,
+        game_over_penalty=80.0,
+    ),
+    2: RewardConfig(
+        survival_bonus=1.5,
+        safe_placement_bonus=0.8,
+        line_rewards=(0.0, 45.0, 140.0, 340.0, 900.0),
+        new_hole_penalty=12.0,
+        hole_delta_penalty=8.0,
+        height_increase_penalty=0.35,
+        bumpiness_increase_penalty=0.5,
+        danger_height=15,
+        danger_height_penalty=0.5,
+        game_over_penalty=100.0,
+    ),
 }
 
 
@@ -98,7 +138,8 @@ class TetrisEnv(gym.Env):
         self.height = BOARD_HEIGHT
         self.max_steps = max_steps
         self.render_mode = render_mode
-        self.reward_config = reward_config or RewardConfig()
+        self.custom_reward_config = reward_config
+        self.reward_config = reward_config or STAGE_REWARD_CONFIGS[stage]
 
         self.action_space = spaces.Discrete(self.width * 4)
 
@@ -131,6 +172,8 @@ class TetrisEnv(gym.Env):
             raise ValueError("지원하지 않는 커리큘럼 단계입니다. stage는 0, 1, 2 중 하나여야 합니다.")
         self.stage = stage
         self.stage_config = STAGE_CONFIGS[stage]
+        if self.custom_reward_config is None:
+            self.reward_config = STAGE_REWARD_CONFIGS[stage]
 
     def get_stage(self) -> int:
         """현재 커리큘럼 단계를 반환합니다."""

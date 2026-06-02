@@ -51,8 +51,8 @@ class TetrisCurriculumCallback(BaseCallback):
         super().__init__(verbose=0)
         self.models_dir = models_dir
         self.gates = gates or {
-            0: StageGate(reward_threshold=80.0, length_threshold=50.0),
-            1: StageGate(reward_threshold=160.0, length_threshold=70.0),
+            0: StageGate(reward_threshold=40.0, length_threshold=45.0),
+            1: StageGate(reward_threshold=80.0, length_threshold=60.0),
         }
         self.window_size = window_size
         self.checkpoint_freq = checkpoint_freq
