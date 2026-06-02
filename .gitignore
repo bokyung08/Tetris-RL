@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+
+.venv/
+/venv/
+/env/
+
+tetris_rl/logs/*
+!tetris_rl/logs/.gitkeep
+
+tetris_rl/models/*
+!tetris_rl/models/.gitkeep
+
+*.egg-info/
+.pytest_cache/
