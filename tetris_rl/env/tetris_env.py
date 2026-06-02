@@ -21,6 +21,33 @@ class StageConfig:
     expose_next_block: bool
 
 
+@dataclass(frozen=True)
+class BoardMetrics:
+    heights: np.ndarray
+    holes: np.ndarray
+    aggregate_height: int
+    total_holes: int
+    bumpiness: int
+    max_height: int
+
+
+@dataclass(frozen=True)
+class RewardConfig:
+    survival_bonus: float = 1.0
+    safe_placement_bonus: float = 0.5
+    line_rewards: tuple[float, float, float, float, float] = (0.0, 25.0, 80.0, 180.0, 500.0)
+    new_hole_penalty: float = 18.0
+    hole_delta_penalty: float = 10.0
+    height_increase_penalty: float = 0.4
+    height_decrease_bonus: float = 0.15
+    bumpiness_increase_penalty: float = 0.7
+    bumpiness_decrease_bonus: float = 0.2
+    danger_height: int = 14
+    danger_height_penalty: float = 1.2
+    invalid_action_penalty: float = 2.0
+    game_over_penalty: float = 180.0
+
+
 STAGE_CONFIGS = {
     0: StageConfig(blocks=("I", "O"), fall_speed=1.0, expose_next_block=False),
     1: StageConfig(blocks=BLOCK_NAMES, fall_speed=0.5, expose_next_block=False),
@@ -64,17 +91,18 @@ class TetrisEnv(gym.Env):
         stage: int = 0,
         max_steps: int = 5_000,
         render_mode: str | None = None,
+        reward_config: RewardConfig | None = None,
     ) -> None:
         super().__init__()
         self.width = BOARD_WIDTH
         self.height = BOARD_HEIGHT
         self.max_steps = max_steps
         self.render_mode = render_mode
+        self.reward_config = reward_config or RewardConfig()
 
         self.action_space = spaces.Discrete(self.width * 4)
 
-        # 명세에는 32차원이라고 되어 있지만, 지정된 항목 합계는 35차원입니다.
-        # 항목을 누락하지 않기 위해 10+10+7+7+1 구조를 그대로 사용합니다.
+        # 지정된 상태 항목 합계는 10+10+7+7+1=35차원입니다.
         self.observation_size = self.width + self.width + len(BLOCK_NAMES) + len(BLOCK_NAMES) + 1
         low = np.zeros(self.observation_size, dtype=np.float32)
         high = np.concatenate(
@@ -98,7 +126,7 @@ class TetrisEnv(gym.Env):
         self.set_stage(stage)
 
     def set_stage(self, stage: int) -> None:
-        """커리큘럼 학습 단계에 맞춰 블록 풀과 next block 노출 여부를 바꿉니다."""
+        """커리큘럼 단계에 맞춰 블록 풀과 next block 노출 여부를 바꿉니다."""
         if stage not in STAGE_CONFIGS:
             raise ValueError("지원하지 않는 커리큘럼 단계입니다. stage는 0, 1, 2 중 하나여야 합니다.")
         self.stage = stage
@@ -132,35 +160,13 @@ class TetrisEnv(gym.Env):
         if self.game_over:
             return self._get_observation(), 0.0, True, False, self._get_info(cleared_lines=0)
 
-        column, rotation = self._decode_action(action)
-        matrix = BLOCK_ROTATIONS[self.current_block][rotation]
-        placed_column = self._fit_column(column, matrix)
-
-        holes_before = int(np.sum(self._get_holes()))
-        placement_failed, spawn_collision = self._drop_and_lock(matrix, placed_column)
-
-        cleared_lines = 0
-        if not placement_failed:
-            cleared_lines = self._clear_lines()
-
-        heights = self._get_column_heights()
-        holes_after = int(np.sum(self._get_holes()))
-        new_holes = max(0, holes_after - holes_before)
-        aggregate_height = int(np.sum(heights))
-        bumpiness = int(np.sum(np.abs(np.diff(heights))))
-
-        reward = self._calculate_reward(
-            cleared_lines=cleared_lines,
-            new_holes=new_holes,
-            aggregate_height=aggregate_height,
-            bumpiness=bumpiness,
-            game_over=placement_failed or spawn_collision,
-        )
+        result = self._place_action(action)
+        reward = result["reward"]
 
         self.steps += 1
-        self.total_lines += cleared_lines
+        self.total_lines += int(result["cleared_lines"])
         self.total_reward += reward
-        self.game_over = placement_failed or spawn_collision
+        self.game_over = bool(result["game_over"])
 
         self.current_block = self.next_block
         self.next_block = self._sample_block()
@@ -169,61 +175,37 @@ class TetrisEnv(gym.Env):
         truncated = self.steps >= self.max_steps and not terminated
 
         info = self._get_info(
-            cleared_lines=cleared_lines,
-            requested_column=column,
-            placed_column=placed_column,
-            rotation=rotation,
-            new_holes=new_holes,
-            aggregate_height=aggregate_height,
-            bumpiness=bumpiness,
+            cleared_lines=int(result["cleared_lines"]),
+            requested_column=int(result["requested_column"]),
+            placed_column=int(result["placed_column"]),
+            rotation=int(result["rotation"]),
+            invalid_action=bool(result["invalid_action"]),
+            new_holes=int(result["new_holes"]),
+            hole_delta=int(result["hole_delta"]),
+            aggregate_height=int(result["aggregate_height"]),
+            height_delta=int(result["height_delta"]),
+            bumpiness=int(result["bumpiness"]),
+            bumpiness_delta=int(result["bumpiness_delta"]),
+            max_height=int(result["max_height"]),
         )
         return self._get_observation(), float(reward), terminated, truncated, info
 
     def preview_action(self, action: int) -> dict[str, Any]:
         """환경 상태를 바꾸지 않고 특정 행동의 즉시 배치 결과를 계산합니다."""
         original_board = self.board.copy()
-
         try:
-            column, rotation = self._decode_action(action)
-            matrix = BLOCK_ROTATIONS[self.current_block][rotation]
-            placed_column = self._fit_column(column, matrix)
-
-            holes_before = int(np.sum(self._get_holes()))
-            placement_failed, spawn_collision = self._drop_and_lock(matrix, placed_column)
-
-            cleared_lines = 0
-            if not placement_failed:
-                cleared_lines = self._clear_lines()
-
-            heights = self._get_column_heights()
-            holes_after = int(np.sum(self._get_holes()))
-            new_holes = max(0, holes_after - holes_before)
-            aggregate_height = int(np.sum(heights))
-            bumpiness = int(np.sum(np.abs(np.diff(heights))))
-            game_over = placement_failed or spawn_collision
-            reward = self._calculate_reward(
-                cleared_lines=cleared_lines,
-                new_holes=new_holes,
-                aggregate_height=aggregate_height,
-                bumpiness=bumpiness,
-                game_over=game_over,
-            )
-
-            return {
-                "action": int(action),
-                "requested_column": column,
-                "placed_column": placed_column,
-                "rotation": rotation,
-                "cleared_lines": cleared_lines,
-                "new_holes": new_holes,
-                "total_holes": holes_after,
-                "aggregate_height": aggregate_height,
-                "bumpiness": bumpiness,
-                "game_over": game_over,
-                "reward": float(reward),
-            }
+            return self._place_action(action)
         finally:
             self.board = original_board
+
+    def get_action_mask(self) -> np.ndarray:
+        """현재 블록 기준으로 보드 폭을 넘는 중복 행동을 표시합니다."""
+        mask = np.zeros(self.action_space.n, dtype=bool)
+        for action in range(self.action_space.n):
+            column, rotation = self._decode_action(action)
+            matrix = BLOCK_ROTATIONS[self.current_block][rotation]
+            mask[action] = column <= self.width - matrix.shape[1]
+        return mask
 
     def render(self) -> str | None:
         lines = ["+" + "-" * self.width + "+"]
@@ -242,6 +224,48 @@ class TetrisEnv(gym.Env):
 
     def close(self) -> None:
         """Gymnasium 인터페이스 호환을 위한 종료 메서드입니다."""
+
+    def _place_action(self, action: int) -> dict[str, Any]:
+        metrics_before = self._get_board_metrics()
+        column, rotation = self._decode_action(action)
+        matrix = BLOCK_ROTATIONS[self.current_block][rotation]
+        placed_column = self._fit_column(column, matrix)
+        invalid_action = column != placed_column
+
+        placement_failed, spawn_collision = self._drop_and_lock(matrix, placed_column)
+
+        cleared_lines = 0
+        if not placement_failed:
+            cleared_lines = self._clear_lines()
+
+        metrics_after = self._get_board_metrics()
+        game_over = placement_failed or spawn_collision
+        reward = self._calculate_reward(
+            cleared_lines=cleared_lines,
+            before=metrics_before,
+            after=metrics_after,
+            invalid_action=invalid_action,
+            game_over=game_over,
+        )
+
+        return {
+            "action": int(action),
+            "requested_column": column,
+            "placed_column": placed_column,
+            "rotation": rotation,
+            "invalid_action": invalid_action,
+            "cleared_lines": cleared_lines,
+            "new_holes": max(0, metrics_after.total_holes - metrics_before.total_holes),
+            "hole_delta": metrics_after.total_holes - metrics_before.total_holes,
+            "total_holes": metrics_after.total_holes,
+            "aggregate_height": metrics_after.aggregate_height,
+            "height_delta": metrics_after.aggregate_height - metrics_before.aggregate_height,
+            "bumpiness": metrics_after.bumpiness,
+            "bumpiness_delta": metrics_after.bumpiness - metrics_before.bumpiness,
+            "max_height": metrics_after.max_height,
+            "game_over": game_over,
+            "reward": float(reward),
+        }
 
     def _decode_action(self, action: int) -> tuple[int, int]:
         action = int(action)
@@ -296,6 +320,22 @@ class TetrisEnv(gym.Env):
         self.board = np.vstack([empty_rows, remaining_rows])
         return cleared_lines
 
+    def _get_board_metrics(self) -> BoardMetrics:
+        heights = self._get_column_heights()
+        holes = self._get_holes()
+        aggregate_height = int(np.sum(heights))
+        total_holes = int(np.sum(holes))
+        bumpiness = int(np.sum(np.abs(np.diff(heights))))
+        max_height = int(np.max(heights))
+        return BoardMetrics(
+            heights=heights,
+            holes=holes,
+            aggregate_height=aggregate_height,
+            total_holes=total_holes,
+            bumpiness=bumpiness,
+            max_height=max_height,
+        )
+
     def _get_column_heights(self) -> np.ndarray:
         heights = np.zeros(self.width, dtype=np.float32)
         for column in range(self.width):
@@ -320,32 +360,45 @@ class TetrisEnv(gym.Env):
         return vector
 
     def _get_observation(self) -> np.ndarray:
-        heights = self._get_column_heights()
-        holes = self._get_holes()
+        metrics = self._get_board_metrics()
         current_block = self._one_hot_block(self.current_block)
         if self.stage_config.expose_next_block:
             next_block = self._one_hot_block(self.next_block)
         else:
             next_block = np.zeros(len(BLOCK_NAMES), dtype=np.float32)
         stage = np.array([float(self.stage)], dtype=np.float32)
-        return np.concatenate([heights, holes, current_block, next_block, stage]).astype(np.float32)
+        return np.concatenate([metrics.heights, metrics.holes, current_block, next_block, stage]).astype(np.float32)
 
     def _calculate_reward(
         self,
         *,
         cleared_lines: int,
-        new_holes: int,
-        aggregate_height: int,
-        bumpiness: int,
+        before: BoardMetrics,
+        after: BoardMetrics,
+        invalid_action: bool,
         game_over: bool,
     ) -> float:
-        reward = 100.0 * (cleared_lines**2)
-        reward -= 5.0 * new_holes
-        reward -= 0.5 * aggregate_height
-        reward -= 0.3 * bumpiness
-        reward += 0.1
+        config = self.reward_config
+        hole_delta = after.total_holes - before.total_holes
+        height_delta = after.aggregate_height - before.aggregate_height
+        bumpiness_delta = after.bumpiness - before.bumpiness
+        danger_height = max(0, after.max_height - config.danger_height)
+
+        reward = config.survival_bonus
+        reward += config.line_rewards[min(cleared_lines, 4)]
+        reward += config.safe_placement_bonus if hole_delta <= 0 and not game_over else 0.0
+        reward -= config.new_hole_penalty * max(0, hole_delta)
+        reward -= config.hole_delta_penalty * max(0, hole_delta)
+        reward -= config.height_increase_penalty * max(0, height_delta)
+        reward += config.height_decrease_bonus * max(0, -height_delta)
+        reward -= config.bumpiness_increase_penalty * max(0, bumpiness_delta)
+        reward += config.bumpiness_decrease_bonus * max(0, -bumpiness_delta)
+        reward -= config.danger_height_penalty * (danger_height**2)
+
+        if invalid_action:
+            reward -= config.invalid_action_penalty
         if game_over:
-            reward -= 50.0
+            reward -= config.game_over_penalty
         return reward
 
     def _get_info(self, cleared_lines: int, **kwargs: Any) -> dict[str, Any]:

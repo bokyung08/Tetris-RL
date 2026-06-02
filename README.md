@@ -3,6 +3,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![Gymnasium](https://img.shields.io/badge/Gymnasium-Custom%20Env-008080)
 ![Stable-Baselines3](https://img.shields.io/badge/Stable--Baselines3-PPO-EE4C2C)
+![PyTorch](https://img.shields.io/badge/PyTorch-Custom%20Extractor-EE4C2C?logo=pytorch&logoColor=white)
 ![NumPy](https://img.shields.io/badge/NumPy-1.24%2B-013243?logo=numpy&logoColor=white)
 ![Matplotlib](https://img.shields.io/badge/Matplotlib-Visualization-11557C)
 ![TensorBoard](https://img.shields.io/badge/TensorBoard-Logging-FF6F00?logo=tensorflow&logoColor=white)
@@ -23,6 +24,7 @@ Gymnasium 커스텀 테트리스 환경에서 Stable-Baselines3 PPO 에이전트
 - Python 3.10+
 - Gymnasium
 - Stable-Baselines3 PPO
+- PyTorch
 - NumPy
 - Matplotlib
 - TensorBoard
@@ -38,14 +40,29 @@ Gymnasium 커스텀 테트리스 환경에서 Stable-Baselines3 PPO 에이전트
 - 블록: I, O, T, S, Z, J, L
 - 상태 벡터: 열 높이, 열 구멍 수, 현재 블록 원핫, 다음 블록 원핫, 커리큘럼 단계
 - 보상:
-  - 라인 클리어: `+100 x cleared_lines^2`
-  - 새 구멍 패널티: `-5 x new_holes`
-  - 총 높이 패널티: `-0.5 x aggregate_height`
-  - 굴곡도 패널티: `-0.3 x bumpiness`
-  - 생존 보너스: `+0.1`
-  - 게임오버 패널티: `-50`
+  - 라인 클리어: 1줄 `+25`, 2줄 `+80`, 3줄 `+180`, 4줄 `+500`
+  - 생존 보너스: `+1.0`
+  - 안전한 배치 보너스: 새 구멍이 없으면 `+0.5`
+  - 새 구멍 및 구멍 증가 패널티: 구멍 증가량 중심 감점
+  - 높이/굴곡도 패널티: 전체 값이 아니라 이번 행동으로 악화된 변화량 중심 감점
+  - 위험 높이 패널티: 최대 높이가 14칸을 넘으면 제곱 패널티
+  - 게임오버 패널티: `-180`
 
 명세의 상태 항목을 모두 포함하면 `10+10+7+7+1=35`차원이므로, 항목 누락 없이 35차원 observation으로 구현했습니다.
+
+### 테트리스 전용 PPO
+
+[tetris_rl/ppo/tetris_policy.py](./tetris_rl/ppo/tetris_policy.py)
+
+일반 MLP에 35차원 벡터를 그대로 넣지 않고, 상태를 테트리스 구조에 맞게 나눠 처리합니다.
+
+- 열 높이 10개 전용 encoder
+- 열 구멍 수 10개 전용 encoder
+- 현재/다음 블록 one-hot encoder
+- 총 높이, 총 구멍, 굴곡도, 최대 높이, 높이 범위, stage 등 파생 지표 encoder
+- PPO actor와 critic은 이 feature extractor의 결과를 사용
+
+기존 보상은 매 스텝 총 높이를 계속 벌줘 오래 살아남을수록 누적 손해가 커질 수 있었습니다. 현재 버전은 행동 전후 변화량을 중심으로 보상을 계산해, 생존과 좋은 배치를 동시에 학습하도록 수정했습니다.
 
 ### PPO 커리큘럼 학습
 
@@ -54,8 +71,11 @@ Gymnasium 커스텀 테트리스 환경에서 Stable-Baselines3 PPO 에이전트
 - Stage 0: I, O 블록만 사용
 - Stage 1: 전체 블록 사용
 - Stage 2: 전체 블록과 next block 정보 사용
-- 최근 에피소드 평균 보상이 기준을 넘으면 자동으로 다음 단계로 전환
+- 최근 에피소드 평균 보상과 평균 생존 스텝이 기준을 넘으면 자동으로 다음 단계로 전환
+- 기준에 오래 못 미치면 지정된 스텝 이후 다음 stage로 강제 전환해 학습 정체를 방지
 - 단계별 모델 저장: `tetris_rl/models/stage{n}.zip`
+- 전용 모델 저장: `tetris_rl/models/tetris_ppo_stage{n}.zip`, `tetris_rl/models/tetris_ppo_final.zip`
+- 중간 체크포인트 저장: `tetris_rl/models/tetris_ppo_latest.zip`
 - TensorBoard 로그 저장: `tetris_rl/logs/`
 
 ### 휴리스틱 기준선
@@ -99,6 +119,8 @@ tetris/
 │   │   └── train.py
 │   ├── eval/
 │   │   └── evaluate.py
+│   ├── ppo/
+│   │   └── tetris_policy.py
 │   ├── logs/
 │   └── models/
 ├── requirements.txt

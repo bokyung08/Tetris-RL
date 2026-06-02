@@ -20,7 +20,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from tetris_rl.env.tetris_env import TetrisEnv
+from tetris_rl.ppo import TetrisFeatureExtractor
 from tetris_hu import choose_heuristic_action
+
+
+_TETRIS_FEATURE_EXTRACTOR = TetrisFeatureExtractor
 
 
 ActionPolicy = Callable[[np.ndarray, TetrisEnv], int]
@@ -66,6 +70,20 @@ def parse_args() -> argparse.Namespace:
 
 
 def find_default_model(model_dir: Path) -> Path:
+    preferred_names = [
+        "tetris_ppo_final.zip",
+        "tetris_ppo_stage2.zip",
+        "stage2.zip",
+        "tetris_ppo_latest.zip",
+        "tetris_ppo_stage1.zip",
+        "stage1.zip",
+        "tetris_ppo_stage0.zip",
+        "stage0.zip",
+    ]
+    for name in preferred_names:
+        candidate = model_dir / name
+        if candidate.exists():
+            return candidate
     for stage in (2, 1, 0):
         candidate = model_dir / f"stage{stage}.zip"
         if candidate.exists():
