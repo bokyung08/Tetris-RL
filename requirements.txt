@@ -1,6 +1,7 @@
 # 설치: pip install -r requirements.txt
 gymnasium>=0.29.0
-stable-baselines3>=2.3.0
+stable-baselines3>=2.8.0
+sb3-contrib>=2.8.0
 torch>=2.0.0
 numpy>=1.24.0
 matplotlib>=3.7.0

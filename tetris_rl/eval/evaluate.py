@@ -12,6 +12,7 @@ from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
+from sb3_contrib import MaskablePPO
 from stable_baselines3 import PPO
 
 
@@ -71,6 +72,11 @@ def parse_args() -> argparse.Namespace:
 
 def find_default_model(model_dir: Path) -> Path:
     preferred_names = [
+        "tetris_maskable_ppo_final.zip",
+        "tetris_maskable_ppo_stage2.zip",
+        "tetris_maskable_ppo_latest.zip",
+        "tetris_maskable_ppo_stage1.zip",
+        "tetris_maskable_ppo_stage0.zip",
         "tetris_ppo_final.zip",
         "tetris_ppo_stage2.zip",
         "stage2.zip",
@@ -89,6 +95,14 @@ def find_default_model(model_dir: Path) -> Path:
         if candidate.exists():
             return candidate
     raise FileNotFoundError("평가할 모델을 찾을 수 없습니다. --model 경로를 지정하거나 먼저 학습을 실행하세요.")
+
+
+def load_policy_model(model_path: Path) -> tuple[Any, bool]:
+    """MaskablePPO 모델을 우선 로드하고, 기존 PPO 모델은 fallback으로 로드합니다."""
+    try:
+        return MaskablePPO.load(str(model_path)), True
+    except Exception:
+        return PPO.load(str(model_path)), False
 
 
 def configure_korean_font() -> None:
@@ -328,16 +342,22 @@ def print_improvement(improvement: dict[str, dict[str, float | None]]) -> None:
 
 def evaluate_model(args: argparse.Namespace) -> None:
     model_path = args.model if args.model else find_default_model(args.model_dir)
-    model = PPO.load(str(model_path))
+    model, uses_action_mask = load_policy_model(model_path)
 
     def ppo_policy(obs: np.ndarray, _env: TetrisEnv) -> int:
-        action, _ = model.predict(obs, deterministic=True)
+        if uses_action_mask:
+            action, _ = model.predict(obs, deterministic=True, action_masks=_env.action_masks())
+        else:
+            action, _ = model.predict(obs, deterministic=True)
         return int(np.asarray(action).item())
 
     print(f"모델을 불러왔습니다: {model_path}")
+    policy_label = "MaskablePPO" if uses_action_mask else "PPO"
+    if uses_action_mask:
+        print("Action Masking 평가를 사용합니다.")
 
     ppo_env = TetrisEnv(stage=args.stage, max_steps=args.max_steps, render_mode="human" if args.render else None)
-    ppo_result = run_policy("PPO", ppo_env, args.episodes, args.seed, ppo_policy, render=args.render)
+    ppo_result = run_policy(policy_label, ppo_env, args.episodes, args.seed, ppo_policy, render=args.render)
     ppo_env.close()
 
     heuristic_result: EvaluationResult | None = None

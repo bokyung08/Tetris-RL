@@ -250,6 +250,10 @@ class TetrisEnv(gym.Env):
             mask[action] = column <= self.width - matrix.shape[1]
         return mask
 
+    def action_masks(self) -> np.ndarray:
+        """MaskablePPO가 읽는 합법 행동 마스크를 반환합니다."""
+        return self.get_action_mask()
+
     def render(self) -> str | None:
         lines = ["+" + "-" * self.width + "+"]
         for row in self.board:

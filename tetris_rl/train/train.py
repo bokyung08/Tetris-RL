@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Callable
 
 import numpy as np
-from stable_baselines3 import PPO
+from sb3_contrib import MaskablePPO
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
@@ -68,7 +68,7 @@ class TetrisCurriculumCallback(BaseCallback):
         stages = self.training_env.env_method("get_stage")
         self.current_stage = int(stages[0]) if stages else 0
         self.stage_start_step = self.num_timesteps
-        print(f"테트리스 전용 PPO 학습 시작: Stage {self.current_stage}")
+        print(f"테트리스 전용 MaskablePPO 학습 시작: Stage {self.current_stage}")
 
     def _on_step(self) -> bool:
         for info in self.locals.get("infos", []):
@@ -87,7 +87,7 @@ class TetrisCurriculumCallback(BaseCallback):
         if self.num_timesteps - self.last_checkpoint_step < self.checkpoint_freq:
             return
 
-        path = self.models_dir / "tetris_ppo_latest.zip"
+        path = self.models_dir / "tetris_maskable_ppo_latest.zip"
         self.model.save(str(path))
         self.last_checkpoint_step = self.num_timesteps
         print(f"중간 체크포인트 저장 완료: {path} ({self.num_timesteps} 스텝)")
@@ -133,14 +133,14 @@ class TetrisCurriculumCallback(BaseCallback):
 
     def save_stage_model(self, stage: int) -> Path:
         stage_path = self.models_dir / f"stage{stage}.zip"
-        named_path = self.models_dir / f"tetris_ppo_stage{stage}.zip"
+        named_path = self.models_dir / f"tetris_maskable_ppo_stage{stage}.zip"
         self.model.save(str(stage_path))
         self.model.save(str(named_path))
         return stage_path
 
     def save_final_model(self) -> Path:
         self.save_stage_model(self.current_stage)
-        final_path = self.models_dir / "tetris_ppo_final.zip"
+        final_path = self.models_dir / "tetris_maskable_ppo_final.zip"
         self.model.save(str(final_path))
         print(f"최종 모델 저장 완료: {final_path}")
         return final_path
@@ -180,7 +180,7 @@ def main() -> None:
         [make_env(stage=0, max_steps=args.max_steps, seed=args.seed, rank=rank) for rank in range(args.n_envs)]
     )
 
-    model = PPO(
+    model = MaskablePPO(
         policy="MlpPolicy",
         env=env,
         learning_rate=linear_schedule(3e-4),
@@ -207,11 +207,12 @@ def main() -> None:
         force_stage_after=args.force_stage_after,
     )
 
-    print("테트리스 전용 PPO 학습을 시작합니다.")
+    print("테트리스 전용 MaskablePPO 학습을 시작합니다.")
     print("보상은 라인 클리어와 생존을 장려하고, 새 구멍과 위험 높이를 강하게 벌줍니다.")
+    print("Action Masking으로 현재 블록이 보드 밖으로 나가는 행동은 선택하지 않습니다.")
     print(f"TensorBoard 로그 경로: {args.log_dir}")
     print(f"모델 저장 경로: {args.model_dir}")
-    model.learn(total_timesteps=args.total_timesteps, callback=callback, tb_log_name="tetris_ppo")
+    model.learn(total_timesteps=args.total_timesteps, callback=callback, tb_log_name="tetris_maskable_ppo")
     callback.save_final_model()
     env.close()
     print("학습이 종료되었습니다.")
