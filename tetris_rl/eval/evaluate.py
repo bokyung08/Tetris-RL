@@ -77,6 +77,7 @@ def find_default_model(model_dir: Path) -> Path:
         "tetris_maskable_ppo_latest.zip",
         "tetris_maskable_ppo_stage1.zip",
         "tetris_maskable_ppo_stage0.zip",
+        "tetris_maskable_ppo_imitation.zip",
         "tetris_ppo_final.zip",
         "tetris_ppo_stage2.zip",
         "stage2.zip",

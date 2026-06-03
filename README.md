@@ -93,6 +93,17 @@ Action Masking:
 - 중간 체크포인트 저장: `tetris_rl/models/tetris_maskable_ppo_latest.zip`
 - TensorBoard 로그 저장: `tetris_rl/logs/`
 
+### 휴리스틱 Imitation Pretraining
+
+[tetris_rl/train/pretrain_imitation.py](./tetris_rl/train/pretrain_imitation.py)
+
+랜덤 정책에서 PPO만 시작하면 테트리스는 보상 신호가 늦게 오고 희소해서 배치 전략을 잡기 어렵습니다. 이를 보완하기 위해 휴리스틱을 교사 정책으로 사용합니다.
+
+- 휴리스틱 정책으로 `(상태, action mask, 행동)` 데이터셋 수집
+- MaskablePPO actor를 cross entropy로 지도학습
+- 사전학습 모델 저장: `tetris_rl/models/tetris_maskable_ppo_imitation.zip`
+- 이후 PPO fine-tuning은 `--pretrained-model` 옵션으로 시작
+
 ### 휴리스틱 기준선
 
 [tetris_hu/heuristic_policy.py](./tetris_hu/heuristic_policy.py)
@@ -131,7 +142,8 @@ tetris/
 │   ├── env/
 │   │   └── tetris_env.py
 │   ├── train/
-│   │   └── train.py
+│   │   ├── train.py
+│   │   └── pretrain_imitation.py
 │   ├── eval/
 │   │   └── evaluate.py
 │   ├── ppo/
@@ -154,6 +166,18 @@ MaskablePPO 학습:
 
 ```powershell
 python -m tetris_rl.train.train
+```
+
+휴리스틱 imitation 사전학습:
+
+```powershell
+python -m tetris_rl.train.pretrain_imitation
+```
+
+사전학습 모델에서 MaskablePPO fine-tuning:
+
+```powershell
+python -m tetris_rl.train.train --pretrained-model tetris_rl/models/tetris_maskable_ppo_imitation.zip
 ```
 
 짧은 테스트 학습:

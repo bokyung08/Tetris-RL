@@ -166,6 +166,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--window-size", type=int, default=30, help="단계 전환 평균 계산 에피소드 수")
     parser.add_argument("--checkpoint-freq", type=int, default=100_000, help="중간 모델 저장 주기")
     parser.add_argument("--force-stage-after", type=int, default=350_000, help="기준 미달 시 강제 단계 전환 스텝 수")
+    parser.add_argument("--pretrained-model", type=Path, default=None, help="휴리스틱 imitation 사전학습 모델 경로")
     parser.add_argument("--log-dir", type=Path, default=PROJECT_ROOT / "tetris_rl" / "logs", help="TensorBoard 로그 경로")
     parser.add_argument("--model-dir", type=Path, default=PROJECT_ROOT / "tetris_rl" / "models", help="모델 저장 경로")
     return parser.parse_args()
@@ -180,25 +181,29 @@ def main() -> None:
         [make_env(stage=0, max_steps=args.max_steps, seed=args.seed, rank=rank) for rank in range(args.n_envs)]
     )
 
-    model = MaskablePPO(
-        policy="MlpPolicy",
-        env=env,
-        learning_rate=linear_schedule(3e-4),
-        n_steps=1024,
-        batch_size=256,
-        n_epochs=6,
-        gamma=0.995,
-        gae_lambda=0.95,
-        clip_range=0.15,
-        ent_coef=0.01,
-        vf_coef=0.6,
-        max_grad_norm=0.5,
-        target_kl=0.03,
-        policy_kwargs=get_tetris_policy_kwargs(),
-        tensorboard_log=str(args.log_dir),
-        seed=args.seed,
-        verbose=0,
-    )
+    if args.pretrained_model:
+        model = MaskablePPO.load(str(args.pretrained_model), env=env, tensorboard_log=str(args.log_dir))
+        print(f"사전학습 모델을 불러왔습니다: {args.pretrained_model}")
+    else:
+        model = MaskablePPO(
+            policy="MlpPolicy",
+            env=env,
+            learning_rate=linear_schedule(3e-4),
+            n_steps=1024,
+            batch_size=256,
+            n_epochs=6,
+            gamma=0.995,
+            gae_lambda=0.95,
+            clip_range=0.15,
+            ent_coef=0.01,
+            vf_coef=0.6,
+            max_grad_norm=0.5,
+            target_kl=0.03,
+            policy_kwargs=get_tetris_policy_kwargs(),
+            tensorboard_log=str(args.log_dir),
+            seed=args.seed,
+            verbose=0,
+        )
 
     callback = TetrisCurriculumCallback(
         models_dir=args.model_dir,
