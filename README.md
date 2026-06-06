@@ -180,6 +180,15 @@ python -m tetris_rl.train.pretrain_imitation
 python -m tetris_rl.train.train --pretrained-model tetris_rl/models/tetris_maskable_ppo_imitation.zip
 ```
 
+사전학습 모델을 사용할 때는 기본 fine-tuning 설정이 더 보수적으로 적용됩니다.
+
+- learning rate: `5e-5`
+- entropy coefficient: `0.001`
+- clip range: `0.05`
+- PPO epochs: `2`
+- target KL: `0.01`
+- stage 전환 전 최소 학습 스텝: `150000`
+
 짧은 테스트 학습:
 
 ```powershell

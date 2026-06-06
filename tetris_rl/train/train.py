@@ -47,6 +47,7 @@ class TetrisCurriculumCallback(BaseCallback):
         window_size: int = 30,
         checkpoint_freq: int = 100_000,
         force_stage_after: int = 350_000,
+        min_stage_steps: int = 150_000,
     ) -> None:
         super().__init__(verbose=0)
         self.models_dir = models_dir
@@ -57,6 +58,7 @@ class TetrisCurriculumCallback(BaseCallback):
         self.window_size = window_size
         self.checkpoint_freq = checkpoint_freq
         self.force_stage_after = force_stage_after
+        self.min_stage_steps = min_stage_steps
         self.recent_rewards: deque[float] = deque(maxlen=window_size)
         self.recent_lengths: deque[float] = deque(maxlen=window_size)
         self.current_stage = 0
@@ -99,6 +101,9 @@ class TetrisCurriculumCallback(BaseCallback):
         enough_episodes = len(self.recent_rewards) >= self.window_size
         stage_steps = self.num_timesteps - self.stage_start_step
         forced = self.force_stage_after > 0 and stage_steps >= self.force_stage_after
+
+        if stage_steps < self.min_stage_steps:
+            return
 
         if not enough_episodes and not forced:
             return
@@ -157,6 +162,19 @@ def make_env(stage: int, max_steps: int, seed: int, rank: int):
     return _init
 
 
+def apply_conservative_finetuning_config(model: MaskablePPO, args: argparse.Namespace) -> None:
+    """사전학습 policy가 PPO 업데이트로 급격히 망가지지 않도록 설정을 낮춥니다."""
+    model.learning_rate = linear_schedule(args.pretrained_learning_rate)
+    model.lr_schedule = linear_schedule(args.pretrained_learning_rate)
+    model.clip_range = linear_schedule(args.pretrained_clip_range)
+    model.ent_coef = args.pretrained_ent_coef
+    model.target_kl = args.pretrained_target_kl
+    model.n_epochs = args.pretrained_n_epochs
+    model.batch_size = args.pretrained_batch_size
+    for param_group in model.policy.optimizer.param_groups:
+        param_group["lr"] = args.pretrained_learning_rate
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="테트리스 전용 PPO 커리큘럼 학습")
     parser.add_argument("--total-timesteps", type=int, default=1_000_000, help="전체 학습 스텝 수")
@@ -166,7 +184,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--window-size", type=int, default=30, help="단계 전환 평균 계산 에피소드 수")
     parser.add_argument("--checkpoint-freq", type=int, default=100_000, help="중간 모델 저장 주기")
     parser.add_argument("--force-stage-after", type=int, default=350_000, help="기준 미달 시 강제 단계 전환 스텝 수")
+    parser.add_argument("--min-stage-steps", type=int, default=150_000, help="단계 전환 전 최소 학습 스텝 수")
     parser.add_argument("--pretrained-model", type=Path, default=None, help="휴리스틱 imitation 사전학습 모델 경로")
+    parser.add_argument("--learning-rate", type=float, default=3e-4, help="처음부터 학습할 때 learning rate")
+    parser.add_argument("--ent-coef", type=float, default=0.01, help="처음부터 학습할 때 entropy 계수")
+    parser.add_argument("--clip-range", type=float, default=0.15, help="처음부터 학습할 때 PPO clip range")
+    parser.add_argument("--n-epochs", type=int, default=6, help="처음부터 학습할 때 PPO epoch 수")
+    parser.add_argument("--target-kl", type=float, default=0.03, help="처음부터 학습할 때 target KL")
+    parser.add_argument("--pretrained-learning-rate", type=float, default=5e-5, help="사전학습 모델 fine-tuning learning rate")
+    parser.add_argument("--pretrained-ent-coef", type=float, default=0.001, help="사전학습 모델 fine-tuning entropy 계수")
+    parser.add_argument("--pretrained-clip-range", type=float, default=0.05, help="사전학습 모델 fine-tuning PPO clip range")
+    parser.add_argument("--pretrained-n-epochs", type=int, default=2, help="사전학습 모델 fine-tuning PPO epoch 수")
+    parser.add_argument("--pretrained-target-kl", type=float, default=0.01, help="사전학습 모델 fine-tuning target KL")
+    parser.add_argument("--pretrained-batch-size", type=int, default=512, help="사전학습 모델 fine-tuning 배치 크기")
     parser.add_argument("--log-dir", type=Path, default=PROJECT_ROOT / "tetris_rl" / "logs", help="TensorBoard 로그 경로")
     parser.add_argument("--model-dir", type=Path, default=PROJECT_ROOT / "tetris_rl" / "models", help="모델 저장 경로")
     return parser.parse_args()
@@ -183,22 +213,29 @@ def main() -> None:
 
     if args.pretrained_model:
         model = MaskablePPO.load(str(args.pretrained_model), env=env, tensorboard_log=str(args.log_dir))
+        apply_conservative_finetuning_config(model, args)
         print(f"사전학습 모델을 불러왔습니다: {args.pretrained_model}")
+        print(
+            "보수적 fine-tuning 설정을 적용합니다: "
+            f"lr={args.pretrained_learning_rate}, ent_coef={args.pretrained_ent_coef}, "
+            f"clip={args.pretrained_clip_range}, n_epochs={args.pretrained_n_epochs}, "
+            f"target_kl={args.pretrained_target_kl}"
+        )
     else:
         model = MaskablePPO(
             policy="MlpPolicy",
             env=env,
-            learning_rate=linear_schedule(3e-4),
+            learning_rate=linear_schedule(args.learning_rate),
             n_steps=1024,
             batch_size=256,
-            n_epochs=6,
+            n_epochs=args.n_epochs,
             gamma=0.995,
             gae_lambda=0.95,
-            clip_range=0.15,
-            ent_coef=0.01,
+            clip_range=args.clip_range,
+            ent_coef=args.ent_coef,
             vf_coef=0.6,
             max_grad_norm=0.5,
-            target_kl=0.03,
+            target_kl=args.target_kl,
             policy_kwargs=get_tetris_policy_kwargs(),
             tensorboard_log=str(args.log_dir),
             seed=args.seed,
@@ -210,6 +247,7 @@ def main() -> None:
         window_size=args.window_size,
         checkpoint_freq=args.checkpoint_freq,
         force_stage_after=args.force_stage_after,
+        min_stage_steps=args.min_stage_steps,
     )
 
     print("테트리스 전용 MaskablePPO 학습을 시작합니다.")
