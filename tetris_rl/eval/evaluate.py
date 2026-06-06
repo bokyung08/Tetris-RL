@@ -72,6 +72,10 @@ def parse_args() -> argparse.Namespace:
 
 def find_default_model(model_dir: Path) -> Path:
     preferred_names = [
+        "tetris_maskable_ppo_best.zip",
+        "tetris_maskable_ppo_best_stage2.zip",
+        "tetris_maskable_ppo_best_stage1.zip",
+        "tetris_maskable_ppo_best_stage0.zip",
         "tetris_maskable_ppo_final.zip",
         "tetris_maskable_ppo_stage2.zip",
         "tetris_maskable_ppo_latest.zip",
