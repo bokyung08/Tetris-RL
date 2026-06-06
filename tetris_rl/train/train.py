@@ -9,7 +9,7 @@ from typing import Callable
 
 import numpy as np
 from sb3_contrib import MaskablePPO
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 
@@ -20,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from tetris_rl.env.tetris_env import TetrisEnv
 from tetris_rl.ppo import get_tetris_policy_kwargs
+from tetris_rl.train.imitation_utils import ImitationDataset, collect_imitation_dataset, parse_stages, train_behavior_cloning
 
 
 @dataclass(frozen=True)
@@ -151,6 +152,145 @@ class TetrisCurriculumCallback(BaseCallback):
         return final_path
 
 
+def evaluate_model_on_env(
+    model: MaskablePPO,
+    *,
+    stage: int,
+    episodes: int,
+    max_steps: int,
+    seed: int,
+) -> dict[str, float]:
+    """현재 모델을 deterministic policy로 짧게 평가합니다."""
+    env = TetrisEnv(stage=stage, max_steps=max_steps)
+    rewards: list[float] = []
+    steps: list[int] = []
+    lines: list[int] = []
+
+    for episode in range(episodes):
+        obs, _ = env.reset(seed=seed + episode)
+        done = False
+        total_reward = 0.0
+        info = {"steps": 0, "lines_cleared": 0}
+
+        while not done:
+            action, _ = model.predict(obs, deterministic=True, action_masks=env.action_masks())
+            obs, reward, terminated, truncated, info = env.step(int(np.asarray(action).item()))
+            total_reward += float(reward)
+            done = terminated or truncated
+
+        rewards.append(total_reward)
+        steps.append(int(info["steps"]))
+        lines.append(int(info["lines_cleared"]))
+
+    env.close()
+    return {
+        "reward": float(np.mean(rewards)),
+        "steps": float(np.mean(steps)),
+        "lines": float(np.mean(lines)),
+    }
+
+
+class BestModelEvalCallback(BaseCallback):
+    """평가 성능이 가장 좋은 모델을 별도 파일로 보존합니다."""
+
+    def __init__(
+        self,
+        models_dir: Path,
+        eval_freq: int,
+        eval_episodes: int,
+        eval_max_steps: int,
+        seed: int,
+    ) -> None:
+        super().__init__(verbose=0)
+        self.models_dir = models_dir
+        self.eval_freq = eval_freq
+        self.eval_episodes = eval_episodes
+        self.eval_max_steps = eval_max_steps
+        self.seed = seed
+        self.best_score = -float("inf")
+        self.last_eval_step = 0
+
+    def _on_training_start(self) -> None:
+        self.models_dir.mkdir(parents=True, exist_ok=True)
+        self._evaluate_and_save(reason="초기 모델")
+
+    def _on_step(self) -> bool:
+        if self.eval_freq <= 0:
+            return True
+        if self.num_timesteps - self.last_eval_step >= self.eval_freq:
+            self._evaluate_and_save(reason=f"{self.num_timesteps} 스텝")
+            self.last_eval_step = self.num_timesteps
+        return True
+
+    def _evaluate_and_save(self, reason: str) -> None:
+        stages = self.training_env.env_method("get_stage")
+        stage = int(stages[0]) if stages else 0
+        metrics = evaluate_model_on_env(
+            self.model,
+            stage=stage,
+            episodes=self.eval_episodes,
+            max_steps=self.eval_max_steps,
+            seed=self.seed,
+        )
+        score = metrics["reward"]
+        print(
+            f"Best 평가({reason}, Stage {stage}): 평균 보상 {metrics['reward']:.2f}, "
+            f"평균 생존 {metrics['steps']:.2f}, 평균 라인 {metrics['lines']:.2f}"
+        )
+
+        if score > self.best_score:
+            self.best_score = score
+            best_path = self.models_dir / "tetris_maskable_ppo_best.zip"
+            stage_best_path = self.models_dir / f"tetris_maskable_ppo_best_stage{stage}.zip"
+            self.model.save(str(best_path))
+            self.model.save(str(stage_best_path))
+            print(f"최고 성능 모델 저장 완료: {best_path}")
+
+
+class BehaviorCloningRegularizationCallback(BaseCallback):
+    """PPO 업데이트 사이에 휴리스틱 행동 지도학습을 반복해 policy 붕괴를 막습니다."""
+
+    def __init__(
+        self,
+        dataset: ImitationDataset,
+        update_freq: int,
+        epochs_per_update: int,
+        batch_size: int,
+        entropy_coef: float,
+    ) -> None:
+        super().__init__(verbose=0)
+        self.dataset = dataset
+        self.update_freq = update_freq
+        self.epochs_per_update = epochs_per_update
+        self.batch_size = batch_size
+        self.entropy_coef = entropy_coef
+        self.last_update_step = 0
+
+    def _on_training_start(self) -> None:
+        print(f"BC 정규화 데이터셋 크기: {len(self.dataset.actions)}")
+
+    def _on_step(self) -> bool:
+        return True
+
+    def _on_rollout_end(self) -> None:
+        if self.update_freq <= 0:
+            return
+        if self.num_timesteps - self.last_update_step < self.update_freq:
+            return
+
+        print(f"BC 정규화 업데이트 시작: {self.num_timesteps} 스텝")
+        loss, accuracy = train_behavior_cloning(
+            model=self.model,
+            dataset=self.dataset,
+            epochs=self.epochs_per_update,
+            batch_size=self.batch_size,
+            entropy_coef=self.entropy_coef,
+        )
+        self.last_update_step = self.num_timesteps
+        self.logger.record("bc/loss", loss)
+        self.logger.record("bc/action_accuracy", accuracy)
+
+
 def make_env(stage: int, max_steps: int, seed: int, rank: int):
     """DummyVecEnv에서 사용할 환경 생성 함수를 반환합니다."""
 
@@ -197,6 +337,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pretrained-n-epochs", type=int, default=2, help="사전학습 모델 fine-tuning PPO epoch 수")
     parser.add_argument("--pretrained-target-kl", type=float, default=0.01, help="사전학습 모델 fine-tuning target KL")
     parser.add_argument("--pretrained-batch-size", type=int, default=512, help="사전학습 모델 fine-tuning 배치 크기")
+    parser.add_argument("--bc-regularize", action="store_true", help="PPO fine-tuning 중 휴리스틱 BC 정규화를 반복 적용")
+    parser.add_argument("--bc-stages", type=str, default="0,1,2", help="BC 정규화 데이터 수집 stage 목록")
+    parser.add_argument("--bc-samples-per-stage", type=int, default=2_000, help="BC 정규화 stage별 샘플 수")
+    parser.add_argument("--bc-max-steps", type=int, default=500, help="BC 데이터 수집 에피소드 최대 스텝")
+    parser.add_argument("--bc-update-freq", type=int, default=16_384, help="BC 정규화 업데이트 주기")
+    parser.add_argument("--bc-epochs-per-update", type=int, default=1, help="BC 정규화 1회당 epoch 수")
+    parser.add_argument("--bc-batch-size", type=int, default=512, help="BC 정규화 배치 크기")
+    parser.add_argument("--bc-entropy-coef", type=float, default=0.0005, help="BC 정규화 entropy 계수")
+    parser.add_argument("--eval-freq", type=int, default=50_000, help="best 모델 평가 주기")
+    parser.add_argument("--eval-episodes", type=int, default=10, help="best 모델 평가 에피소드 수")
+    parser.add_argument("--eval-max-steps", type=int, default=500, help="best 모델 평가 에피소드 최대 스텝")
     parser.add_argument("--log-dir", type=Path, default=PROJECT_ROOT / "tetris_rl" / "logs", help="TensorBoard 로그 경로")
     parser.add_argument("--model-dir", type=Path, default=PROJECT_ROOT / "tetris_rl" / "models", help="모델 저장 경로")
     return parser.parse_args()
@@ -249,13 +400,41 @@ def main() -> None:
         force_stage_after=args.force_stage_after,
         min_stage_steps=args.min_stage_steps,
     )
+    callbacks: list[BaseCallback] = [
+        callback,
+        BestModelEvalCallback(
+            models_dir=args.model_dir,
+            eval_freq=args.eval_freq,
+            eval_episodes=args.eval_episodes,
+            eval_max_steps=args.eval_max_steps,
+            seed=args.seed + 10_000,
+        ),
+    ]
+
+    if args.bc_regularize:
+        print("BC 정규화 데이터셋을 수집합니다.")
+        bc_dataset = collect_imitation_dataset(
+            stages=parse_stages(args.bc_stages),
+            samples_per_stage=args.bc_samples_per_stage,
+            max_steps=args.bc_max_steps,
+            seed=args.seed + 20_000,
+        )
+        callbacks.append(
+            BehaviorCloningRegularizationCallback(
+                dataset=bc_dataset,
+                update_freq=args.bc_update_freq,
+                epochs_per_update=args.bc_epochs_per_update,
+                batch_size=args.bc_batch_size,
+                entropy_coef=args.bc_entropy_coef,
+            )
+        )
 
     print("테트리스 전용 MaskablePPO 학습을 시작합니다.")
     print("보상은 라인 클리어와 생존을 장려하고, 새 구멍과 위험 높이를 강하게 벌줍니다.")
     print("Action Masking으로 현재 블록이 보드 밖으로 나가는 행동은 선택하지 않습니다.")
     print(f"TensorBoard 로그 경로: {args.log_dir}")
     print(f"모델 저장 경로: {args.model_dir}")
-    model.learn(total_timesteps=args.total_timesteps, callback=callback, tb_log_name="tetris_maskable_ppo")
+    model.learn(total_timesteps=args.total_timesteps, callback=CallbackList(callbacks), tb_log_name="tetris_maskable_ppo")
     callback.save_final_model()
     env.close()
     print("학습이 종료되었습니다.")

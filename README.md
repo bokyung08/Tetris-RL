@@ -189,6 +189,16 @@ python -m tetris_rl.train.train --pretrained-model tetris_rl/models/tetris_maska
 - target KL: `0.01`
 - stage 전환 전 최소 학습 스텝: `150000`
 
+fine-tuning 중 policy가 휴리스틱 teacher에서 너무 멀어지면 성능이 무너질 수 있어, BC 정규화를 함께 사용할 수 있습니다.
+
+- PPO rollout 사이에 휴리스틱 행동 지도학습을 반복 적용
+- 평가 성능이 가장 좋은 모델을 `tetris_maskable_ppo_best.zip`으로 별도 저장
+- PPO와 DQN을 한 루프에 섞기보다, 먼저 BC-regularized PPO로 teacher policy 붕괴를 막는 설계
+
+```powershell
+python -m tetris_rl.train.train --pretrained-model tetris_rl/models/tetris_maskable_ppo_imitation.zip --bc-regularize
+```
+
 짧은 테스트 학습:
 
 ```powershell
