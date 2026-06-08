@@ -37,12 +37,18 @@ class EvaluationResult:
     survival_steps: list[int]
     line_counts: list[int]
     rewards: list[float]
+    line_clear_histories: list[dict[int, int]]
 
     def summary(self) -> dict[str, float]:
+        total_episodes = max(1, len(self.line_clear_histories))
         return {
             "average_survival_steps": float(np.mean(self.survival_steps)),
             "average_lines_cleared": float(np.mean(self.line_counts)),
             "average_reward": float(np.mean(self.rewards)),
+            "average_single_clears": sum(history.get(1, 0) for history in self.line_clear_histories) / total_episodes,
+            "average_double_clears": sum(history.get(2, 0) for history in self.line_clear_histories) / total_episodes,
+            "average_triple_clears": sum(history.get(3, 0) for history in self.line_clear_histories) / total_episodes,
+            "average_tetris_clears": sum(history.get(4, 0) for history in self.line_clear_histories) / total_episodes,
         }
 
 
@@ -166,6 +172,7 @@ def run_policy(
     survival_steps: list[int] = []
     line_counts: list[int] = []
     episode_rewards: list[float] = []
+    line_clear_histories: list[dict[int, int]] = []
 
     print(f"{policy_name} 평가를 시작합니다. 에피소드 수: {episodes}")
 
@@ -174,6 +181,7 @@ def run_policy(
         done = False
         total_reward = 0.0
         last_info: dict[str, Any] = {"steps": 0, "lines_cleared": 0}
+        clear_history = {1: 0, 2: 0, 3: 0, 4: 0}
 
         while not done:
             action = action_policy(obs, env)
@@ -181,18 +189,23 @@ def run_policy(
             total_reward += float(reward)
             done = terminated or truncated
             last_info = info
+            cleared_lines = int(info.get("cleared_lines", 0))
+            if 1 <= cleared_lines <= 4:
+                clear_history[cleared_lines] += 1
             if render:
                 env.render()
 
         survival_steps.append(int(last_info["steps"]))
         line_counts.append(int(last_info["lines_cleared"]))
         episode_rewards.append(total_reward)
+        line_clear_histories.append(clear_history)
 
     return EvaluationResult(
         policy_name=policy_name,
         survival_steps=survival_steps,
         line_counts=line_counts,
         rewards=episode_rewards,
+        line_clear_histories=line_clear_histories,
     )
 
 
@@ -222,13 +235,37 @@ def save_episode_metrics(log_dir: Path, results: list[EvaluationResult]) -> Path
     output_path = log_dir / "evaluation_episodes.csv"
     with output_path.open("w", encoding="utf-8", newline="") as file:
         writer = csv.writer(file)
-        writer.writerow(["policy", "episode", "survival_steps", "lines_cleared", "reward"])
+        writer.writerow(
+            [
+                "policy",
+                "episode",
+                "survival_steps",
+                "lines_cleared",
+                "single_clears",
+                "double_clears",
+                "triple_clears",
+                "tetris_clears",
+                "reward",
+            ]
+        )
         for result in results:
-            for index, (steps, lines, reward) in enumerate(
-                zip(result.survival_steps, result.line_counts, result.rewards),
+            for index, (steps, lines, reward, clear_history) in enumerate(
+                zip(result.survival_steps, result.line_counts, result.rewards, result.line_clear_histories),
                 start=1,
             ):
-                writer.writerow([result.policy_name, index, steps, lines, f"{reward:.6f}"])
+                writer.writerow(
+                    [
+                        result.policy_name,
+                        index,
+                        steps,
+                        lines,
+                        clear_history.get(1, 0),
+                        clear_history.get(2, 0),
+                        clear_history.get(3, 0),
+                        clear_history.get(4, 0),
+                        f"{reward:.6f}",
+                    ]
+                )
     return output_path
 
 
@@ -330,6 +367,13 @@ def print_summary(result: EvaluationResult) -> None:
     summary = result.summary()
     print(f"{result.policy_name} 평균 생존 스텝: {summary['average_survival_steps']:.2f}")
     print(f"{result.policy_name} 평균 라인 클리어 수: {summary['average_lines_cleared']:.2f}")
+    print(
+        f"{result.policy_name} 평균 동시 클리어: "
+        f"1줄 {summary['average_single_clears']:.2f}, "
+        f"2줄 {summary['average_double_clears']:.2f}, "
+        f"3줄 {summary['average_triple_clears']:.2f}, "
+        f"4줄 {summary['average_tetris_clears']:.2f}"
+    )
     print(f"{result.policy_name} 평균 보상: {summary['average_reward']:.2f}")
 
 
@@ -338,6 +382,10 @@ def print_improvement(improvement: dict[str, dict[str, float | None]]) -> None:
         "average_survival_steps": "생존 스텝",
         "average_lines_cleared": "라인 클리어 수",
         "average_reward": "보상",
+        "average_single_clears": "1줄 동시 클리어",
+        "average_double_clears": "2줄 동시 클리어",
+        "average_triple_clears": "3줄 동시 클리어",
+        "average_tetris_clears": "4줄 동시 클리어",
     }
     for metric, values in improvement.items():
         percent = values["improvement_percent"]

@@ -20,7 +20,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from tetris_rl.env.tetris_env import TetrisEnv
 from tetris_rl.ppo import get_tetris_policy_kwargs
-from tetris_rl.train.imitation_utils import ImitationDataset, collect_imitation_dataset, parse_stages, train_behavior_cloning
+from tetris_rl.train.imitation_utils import (
+    ImitationDataset,
+    collect_imitation_dataset,
+    evaluate_behavior_cloning_accuracy,
+    parse_stage_sample_counts,
+    parse_stages,
+    train_behavior_cloning,
+)
 
 
 @dataclass(frozen=True)
@@ -200,6 +207,7 @@ class BestModelEvalCallback(BaseCallback):
         eval_episodes: int,
         eval_max_steps: int,
         seed: int,
+        eval_stages: list[int],
     ) -> None:
         super().__init__(verbose=0)
         self.models_dir = models_dir
@@ -207,7 +215,9 @@ class BestModelEvalCallback(BaseCallback):
         self.eval_episodes = eval_episodes
         self.eval_max_steps = eval_max_steps
         self.seed = seed
+        self.eval_stages = eval_stages
         self.best_score = -float("inf")
+        self.best_stage_scores = {stage: -float("inf") for stage in eval_stages}
         self.last_eval_step = 0
 
     def _on_training_start(self) -> None:
@@ -224,27 +234,43 @@ class BestModelEvalCallback(BaseCallback):
 
     def _evaluate_and_save(self, reason: str) -> None:
         stages = self.training_env.env_method("get_stage")
-        stage = int(stages[0]) if stages else 0
-        metrics = evaluate_model_on_env(
-            self.model,
-            stage=stage,
-            episodes=self.eval_episodes,
-            max_steps=self.eval_max_steps,
-            seed=self.seed,
-        )
-        score = metrics["reward"]
-        print(
-            f"Best 평가({reason}, Stage {stage}): 평균 보상 {metrics['reward']:.2f}, "
-            f"평균 생존 {metrics['steps']:.2f}, 평균 라인 {metrics['lines']:.2f}"
-        )
+        current_stage = int(stages[0]) if stages else 0
+        stage_rewards: list[float] = []
 
-        if score > self.best_score:
-            self.best_score = score
+        print(f"Best 평가({reason}, 현재 Stage {current_stage})를 시작합니다.")
+        for stage in self.eval_stages:
+            metrics = evaluate_model_on_env(
+                self.model,
+                stage=stage,
+                episodes=self.eval_episodes,
+                max_steps=self.eval_max_steps,
+                seed=self.seed + stage * 10_000,
+            )
+            score = metrics["reward"]
+            stage_rewards.append(score)
+            self.logger.record(f"eval/stage{stage}_reward", score)
+            self.logger.record(f"eval/stage{stage}_steps", metrics["steps"])
+            self.logger.record(f"eval/stage{stage}_lines", metrics["lines"])
+            print(
+                f"Stage {stage} 평가: 평균 보상 {metrics['reward']:.2f}, "
+                f"평균 생존 {metrics['steps']:.2f}, 평균 라인 {metrics['lines']:.2f}"
+            )
+
+            if score > self.best_stage_scores[stage]:
+                self.best_stage_scores[stage] = score
+                stage_best_path = self.models_dir / f"tetris_maskable_ppo_best_stage{stage}.zip"
+                self.model.save(str(stage_best_path))
+                print(f"Stage {stage} 최고 성능 모델 저장 완료: {stage_best_path}")
+
+        overall_score = float(np.mean(stage_rewards)) if stage_rewards else -float("inf")
+        self.logger.record("eval/overall_reward", overall_score)
+        print(f"전체 stage 평균 평가 보상: {overall_score:.2f}")
+
+        if overall_score > self.best_score:
+            self.best_score = overall_score
             best_path = self.models_dir / "tetris_maskable_ppo_best.zip"
-            stage_best_path = self.models_dir / f"tetris_maskable_ppo_best_stage{stage}.zip"
             self.model.save(str(best_path))
-            self.model.save(str(stage_best_path))
-            print(f"최고 성능 모델 저장 완료: {best_path}")
+            print(f"전체 stage 기준 최고 성능 모델 저장 완료: {best_path}")
 
 
 class BehaviorCloningRegularizationCallback(BaseCallback):
@@ -257,6 +283,7 @@ class BehaviorCloningRegularizationCallback(BaseCallback):
         epochs_per_update: int,
         batch_size: int,
         entropy_coef: float,
+        eval_batch_size: int,
     ) -> None:
         super().__init__(verbose=0)
         self.dataset = dataset
@@ -264,10 +291,14 @@ class BehaviorCloningRegularizationCallback(BaseCallback):
         self.epochs_per_update = epochs_per_update
         self.batch_size = batch_size
         self.entropy_coef = entropy_coef
+        self.eval_batch_size = eval_batch_size
         self.last_update_step = 0
 
     def _on_training_start(self) -> None:
         print(f"BC 정규화 데이터셋 크기: {len(self.dataset.actions)}")
+        for stage, count in self.dataset.stage_counts().items():
+            print(f"BC 정규화 Stage {stage} 샘플 수: {count}")
+        self._record_action_accuracy(label="초기")
 
     def _on_step(self) -> bool:
         return True
@@ -289,6 +320,20 @@ class BehaviorCloningRegularizationCallback(BaseCallback):
         self.last_update_step = self.num_timesteps
         self.logger.record("bc/loss", loss)
         self.logger.record("bc/action_accuracy", accuracy)
+        self._record_action_accuracy(label="업데이트 후")
+
+    def _record_action_accuracy(self, label: str) -> None:
+        overall_accuracy, stage_accuracy = evaluate_behavior_cloning_accuracy(
+            model=self.model,
+            dataset=self.dataset,
+            batch_size=self.eval_batch_size,
+        )
+        self.logger.record("bc/action_accuracy_eval", overall_accuracy)
+        stage_parts = [f"전체 {overall_accuracy:.2f}%"]
+        for stage, accuracy in stage_accuracy.items():
+            self.logger.record(f"bc/action_accuracy_stage{stage}", accuracy)
+            stage_parts.append(f"Stage {stage} {accuracy:.2f}%")
+        print(f"BC 행동 일치율({label}): " + ", ".join(stage_parts))
 
 
 def make_env(stage: int, max_steps: int, seed: int, rank: int):
@@ -320,10 +365,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--total-timesteps", type=int, default=1_000_000, help="전체 학습 스텝 수")
     parser.add_argument("--seed", type=int, default=42, help="난수 시드")
     parser.add_argument("--n-envs", type=int, default=4, help="벡터 환경 수")
+    parser.add_argument("--start-stage", type=int, default=0, choices=[0, 1, 2], help="학습을 시작할 커리큘럼 stage")
     parser.add_argument("--max-steps", type=int, default=5_000, help="에피소드 최대 스텝 수")
     parser.add_argument("--window-size", type=int, default=30, help="단계 전환 평균 계산 에피소드 수")
     parser.add_argument("--checkpoint-freq", type=int, default=100_000, help="중간 모델 저장 주기")
-    parser.add_argument("--force-stage-after", type=int, default=350_000, help="기준 미달 시 강제 단계 전환 스텝 수")
+    parser.add_argument("--force-stage-after", type=int, default=0, help="기준 미달 시 강제 단계 전환 스텝 수, 0이면 비활성화")
     parser.add_argument("--min-stage-steps", type=int, default=150_000, help="단계 전환 전 최소 학습 스텝 수")
     parser.add_argument("--pretrained-model", type=Path, default=None, help="휴리스틱 imitation 사전학습 모델 경로")
     parser.add_argument("--learning-rate", type=float, default=3e-4, help="처음부터 학습할 때 learning rate")
@@ -331,23 +377,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clip-range", type=float, default=0.15, help="처음부터 학습할 때 PPO clip range")
     parser.add_argument("--n-epochs", type=int, default=6, help="처음부터 학습할 때 PPO epoch 수")
     parser.add_argument("--target-kl", type=float, default=0.03, help="처음부터 학습할 때 target KL")
-    parser.add_argument("--pretrained-learning-rate", type=float, default=5e-5, help="사전학습 모델 fine-tuning learning rate")
-    parser.add_argument("--pretrained-ent-coef", type=float, default=0.001, help="사전학습 모델 fine-tuning entropy 계수")
-    parser.add_argument("--pretrained-clip-range", type=float, default=0.05, help="사전학습 모델 fine-tuning PPO clip range")
-    parser.add_argument("--pretrained-n-epochs", type=int, default=2, help="사전학습 모델 fine-tuning PPO epoch 수")
-    parser.add_argument("--pretrained-target-kl", type=float, default=0.01, help="사전학습 모델 fine-tuning target KL")
-    parser.add_argument("--pretrained-batch-size", type=int, default=512, help="사전학습 모델 fine-tuning 배치 크기")
+    parser.add_argument("--pretrained-learning-rate", type=float, default=2e-5, help="사전학습 모델 fine-tuning learning rate")
+    parser.add_argument("--pretrained-ent-coef", type=float, default=0.0, help="사전학습 모델 fine-tuning entropy 계수")
+    parser.add_argument("--pretrained-clip-range", type=float, default=0.03, help="사전학습 모델 fine-tuning PPO clip range")
+    parser.add_argument("--pretrained-n-epochs", type=int, default=1, help="사전학습 모델 fine-tuning PPO epoch 수")
+    parser.add_argument("--pretrained-target-kl", type=float, default=0.005, help="사전학습 모델 fine-tuning target KL")
+    parser.add_argument("--pretrained-batch-size", type=int, default=1024, help="사전학습 모델 fine-tuning 배치 크기")
     parser.add_argument("--bc-regularize", action="store_true", help="PPO fine-tuning 중 휴리스틱 BC 정규화를 반복 적용")
     parser.add_argument("--bc-stages", type=str, default="0,1,2", help="BC 정규화 데이터 수집 stage 목록")
-    parser.add_argument("--bc-samples-per-stage", type=int, default=2_000, help="BC 정규화 stage별 샘플 수")
+    parser.add_argument("--bc-samples-per-stage", type=int, default=5_000, help="BC 정규화 stage별 기본 샘플 수")
+    parser.add_argument("--bc-stage-samples", type=str, default=None, help="BC stage별 샘플 수, 예: 0:2000,1:20000,2:20000")
     parser.add_argument("--bc-max-steps", type=int, default=500, help="BC 데이터 수집 에피소드 최대 스텝")
-    parser.add_argument("--bc-update-freq", type=int, default=16_384, help="BC 정규화 업데이트 주기")
-    parser.add_argument("--bc-epochs-per-update", type=int, default=1, help="BC 정규화 1회당 epoch 수")
+    parser.add_argument("--bc-update-freq", type=int, default=8_192, help="BC 정규화 업데이트 주기")
+    parser.add_argument("--bc-epochs-per-update", type=int, default=2, help="BC 정규화 1회당 epoch 수")
     parser.add_argument("--bc-batch-size", type=int, default=512, help="BC 정규화 배치 크기")
-    parser.add_argument("--bc-entropy-coef", type=float, default=0.0005, help="BC 정규화 entropy 계수")
+    parser.add_argument("--bc-entropy-coef", type=float, default=0.0, help="BC 정규화 entropy 계수")
     parser.add_argument("--eval-freq", type=int, default=50_000, help="best 모델 평가 주기")
     parser.add_argument("--eval-episodes", type=int, default=10, help="best 모델 평가 에피소드 수")
     parser.add_argument("--eval-max-steps", type=int, default=500, help="best 모델 평가 에피소드 최대 스텝")
+    parser.add_argument("--eval-stages", type=str, default="0,1,2", help="best 모델을 평가할 stage 목록")
     parser.add_argument("--log-dir", type=Path, default=PROJECT_ROOT / "tetris_rl" / "logs", help="TensorBoard 로그 경로")
     parser.add_argument("--model-dir", type=Path, default=PROJECT_ROOT / "tetris_rl" / "models", help="모델 저장 경로")
     return parser.parse_args()
@@ -359,7 +407,7 @@ def main() -> None:
     args.model_dir.mkdir(parents=True, exist_ok=True)
 
     env = DummyVecEnv(
-        [make_env(stage=0, max_steps=args.max_steps, seed=args.seed, rank=rank) for rank in range(args.n_envs)]
+        [make_env(stage=args.start_stage, max_steps=args.max_steps, seed=args.seed, rank=rank) for rank in range(args.n_envs)]
     )
 
     if args.pretrained_model:
@@ -408,14 +456,22 @@ def main() -> None:
             eval_episodes=args.eval_episodes,
             eval_max_steps=args.eval_max_steps,
             seed=args.seed + 10_000,
+            eval_stages=parse_stages(args.eval_stages),
         ),
     ]
 
     if args.bc_regularize:
         print("BC 정규화 데이터셋을 수집합니다.")
+        bc_stages = parse_stages(args.bc_stages)
+        bc_samples_by_stage = parse_stage_sample_counts(
+            raw_counts=args.bc_stage_samples,
+            stages=bc_stages,
+            default_samples=args.bc_samples_per_stage,
+        )
         bc_dataset = collect_imitation_dataset(
-            stages=parse_stages(args.bc_stages),
+            stages=bc_stages,
             samples_per_stage=args.bc_samples_per_stage,
+            samples_by_stage=bc_samples_by_stage,
             max_steps=args.bc_max_steps,
             seed=args.seed + 20_000,
         )
@@ -426,12 +482,14 @@ def main() -> None:
                 epochs_per_update=args.bc_epochs_per_update,
                 batch_size=args.bc_batch_size,
                 entropy_coef=args.bc_entropy_coef,
+                eval_batch_size=args.bc_batch_size,
             )
         )
 
     print("테트리스 전용 MaskablePPO 학습을 시작합니다.")
     print("보상은 라인 클리어와 생존을 장려하고, 새 구멍과 위험 높이를 강하게 벌줍니다.")
     print("Action Masking으로 현재 블록이 보드 밖으로 나가는 행동은 선택하지 않습니다.")
+    print(f"학습 시작 Stage: {args.start_stage}")
     print(f"TensorBoard 로그 경로: {args.log_dir}")
     print(f"모델 저장 경로: {args.model_dir}")
     model.learn(total_timesteps=args.total_timesteps, callback=CallbackList(callbacks), tb_log_name="tetris_maskable_ppo")

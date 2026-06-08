@@ -83,7 +83,7 @@ STAGE_REWARD_CONFIGS = {
     2: RewardConfig(
         survival_bonus=1.5,
         safe_placement_bonus=0.8,
-        line_rewards=(0.0, 45.0, 140.0, 340.0, 900.0),
+        line_rewards=(0.0, 35.0, 180.0, 700.0, 2600.0),
         new_hole_penalty=12.0,
         hole_delta_penalty=8.0,
         height_increase_penalty=0.35,

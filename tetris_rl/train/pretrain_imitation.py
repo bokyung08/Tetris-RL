@@ -15,7 +15,13 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from tetris_rl.env.tetris_env import TetrisEnv
 from tetris_rl.ppo import get_tetris_policy_kwargs
-from tetris_rl.train.imitation_utils import collect_imitation_dataset, parse_stages, train_behavior_cloning
+from tetris_rl.train.imitation_utils import (
+    collect_imitation_dataset,
+    evaluate_behavior_cloning_accuracy,
+    parse_stage_sample_counts,
+    parse_stages,
+    train_behavior_cloning,
+)
 from tetris_rl.train.train import linear_schedule
 
 
@@ -55,11 +61,12 @@ def build_maskable_ppo(env: DummyVecEnv, seed: int, log_dir: Path) -> MaskablePP
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="휴리스틱 정책 기반 MaskablePPO imitation pretraining")
     parser.add_argument("--stages", type=str, default="0,1,2", help="데이터를 수집할 stage 목록. 예: 0 또는 0,1,2")
-    parser.add_argument("--samples-per-stage", type=int, default=5_000, help="stage별 수집 샘플 수")
+    parser.add_argument("--samples-per-stage", type=int, default=5_000, help="stage별 기본 수집 샘플 수")
+    parser.add_argument("--stage-samples", type=str, default=None, help="stage별 수집 샘플 수, 예: 0:5000,1:30000,2:30000")
     parser.add_argument("--max-steps", type=int, default=500, help="데이터 수집 에피소드 최대 스텝 수")
     parser.add_argument("--epochs", type=int, default=10, help="지도학습 epoch 수")
     parser.add_argument("--batch-size", type=int, default=256, help="지도학습 배치 크기")
-    parser.add_argument("--entropy-coef", type=float, default=0.001, help="초기 policy 탐색성을 유지하기 위한 entropy 계수")
+    parser.add_argument("--entropy-coef", type=float, default=0.0, help="초기 policy 탐색성을 유지하기 위한 entropy 계수")
     parser.add_argument("--seed", type=int, default=42, help="난수 시드")
     parser.add_argument(
         "--output-model",
@@ -79,6 +86,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     stages = parse_stages(args.stages)
+    samples_by_stage = parse_stage_sample_counts(
+        raw_counts=args.stage_samples,
+        stages=stages,
+        default_samples=args.samples_per_stage,
+    )
     args.output_model.parent.mkdir(parents=True, exist_ok=True)
     args.log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -86,10 +98,13 @@ def main() -> None:
     dataset = collect_imitation_dataset(
         stages=stages,
         samples_per_stage=args.samples_per_stage,
+        samples_by_stage=samples_by_stage,
         max_steps=args.max_steps,
         seed=args.seed,
     )
     print(f"전체 데이터 수집 완료: {len(dataset.actions)}개")
+    for stage, count in dataset.stage_counts().items():
+        print(f"Stage {stage} 데이터 수: {count}개")
 
     env = make_training_env(stage=stages[0], max_steps=args.max_steps, seed=args.seed)
     model = build_maskable_ppo(env=env, seed=args.seed, log_dir=args.log_dir)
@@ -100,6 +115,14 @@ def main() -> None:
         batch_size=args.batch_size,
         entropy_coef=args.entropy_coef,
     )
+    overall_accuracy, stage_accuracy = evaluate_behavior_cloning_accuracy(
+        model=model,
+        dataset=dataset,
+        batch_size=args.batch_size,
+    )
+    print(f"최종 선생님 행동 일치율: 전체 {overall_accuracy:.2f}%")
+    for stage, accuracy in stage_accuracy.items():
+        print(f"최종 Stage {stage} 행동 일치율: {accuracy:.2f}%")
 
     model.save(str(args.output_model))
     env.close()
