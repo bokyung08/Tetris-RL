@@ -290,18 +290,41 @@ tensorboard --logdir tetris_rl/logs
 
 평가 실행 후 `performance_comparison.json`과 `performance_comparison.csv`를 통해 MaskablePPO가 휴리스틱보다 어떤 지표에서 얼마나 개선됐는지 확인할 수 있습니다.
 
-## 보존 모델과 다음 실험
+## 보존 모델과 최근 실험 결과
 
 현재 보존된 Stage 2 개선 모델:
 
 ```text
 tetris_rl/models/stage2_finetune_v2/tetris_maskable_ppo_final_0608_v2.zip
 tetris_rl/models/stage2_tetris_bonus_v1/tetris_maskable_ppo_best_stage2_0609_tetris_bonus.zip
+tetris_rl/models/stage2_tetris_bonus_v2/tetris_maskable_ppo_final_0609_tetris_bonus_v2.zip
 ```
 
-`tetris_maskable_ppo_best_stage2_0609_tetris_bonus.zip`는 4줄 클리어 보상을 강화한 첫 실험에서 가장 좋은 Stage 2 모델입니다. 50 에피소드 직접 평가 기준으로 이전 `0608_v2` 모델 대비 평균 라인 수와 4줄 클리어 횟수가 소폭 증가했습니다.
+`tetris_maskable_ppo_final_0609_tetris_bonus_v2.zip`는 Stage 2 테트리스 지향 보상 기준에서 현재 가장 좋은 보존 모델입니다.
 
-1줄 클리어 보상을 낮추고 4줄 클리어 보상을 더 키운 후속 실험 명령:
+평가 조건:
+
+- Stage 2
+- 50 에피소드
+- 에피소드 최대 500 스텝
+- deterministic policy
+- 동일 seed 구간
+- Stage 2 보상: 1줄 `+35`, 2줄 `+180`, 3줄 `+700`, 4줄 `+2600`
+
+| 모델 | 평균 보상 | 중앙값 보상 | 평균 생존 | 평균 라인 | 1줄 | 2줄 | 3줄 | 4줄 | 4줄 총합 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `bonus_v1_keep` | 1473.38 | 1312.83 | 164.30 | 49.70 | 42.58 | 3.18 | 0.20 | 0.04 | 2 |
+| `bonus_v2_best_stage2` | 1473.38 | 1312.83 | 164.30 | 49.70 | 42.58 | 3.18 | 0.20 | 0.04 | 2 |
+| `bonus_v2_final` | 1816.02 | 1738.88 | 180.26 | 55.86 | 47.32 | 3.70 | 0.30 | 0.06 | 3 |
+
+분석:
+
+- `bonus_v2_final`이 평균 보상, 중앙값 보상, 생존 스텝, 총 라인 수에서 모두 가장 높았습니다.
+- 4줄 동시 클리어는 50 에피소드 기준 `2회 -> 3회`로 늘었습니다. 아직 큰 폭은 아니지만, 보상 방향은 4줄 클리어를 더 선호하는 쪽으로 움직였습니다.
+- `bonus_v2_best_stage2`는 TensorBoard best 파일이지만, 실제 50 에피소드 직접 평가에서는 초기 모델과 같은 성능이었습니다. Stage 2는 분산이 커서 best 파일만 믿기보다 `best_stage2.zip`과 `final.zip`을 같은 seed로 재평가하는 과정이 필요합니다.
+- 1줄 클리어도 같이 증가했기 때문에, 다음 실험에서는 4줄 클리어를 더 늘리려면 1줄 보상을 추가로 낮추거나 휴리스틱 teacher 자체를 4줄 클리어 지향으로 조정하는 것이 더 직접적입니다.
+
+테트리스 보너스 v2 재현 명령:
 
 ```powershell
 python -m tetris_rl.train.train `
@@ -330,10 +353,10 @@ python -m tetris_rl.train.train `
   --log-dir tetris_rl/logs/stage2_tetris_bonus_v2
 ```
 
-학습 후에는 4줄 클리어가 실제로 늘었는지 아래 평가 지표를 확인합니다.
+학습 후 4줄 클리어가 실제로 늘었는지 확인하는 평가 명령:
 
 ```powershell
-python -m tetris_rl.eval.evaluate --model tetris_rl/models/stage2_tetris_bonus_v2/tetris_maskable_ppo_best_stage2.zip --stage 2 --episodes 100 --max-steps 500 --skip-heuristic --log-dir tetris_rl/logs/stage2_tetris_bonus_v2_eval
+python -m tetris_rl.eval.evaluate --model tetris_rl/models/stage2_tetris_bonus_v2/tetris_maskable_ppo_final_0609_tetris_bonus_v2.zip --stage 2 --episodes 100 --max-steps 500 --skip-heuristic --log-dir tetris_rl/logs/stage2_tetris_bonus_v2_eval
 ```
 
 ## 확장 아이디어
